@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>요청 실험실 · WEEK13 C 웹 서버</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hero">
+    <p class="eyebrow">WEEK13 · C Web Server</p>
+    <h1>요청 실험실</h1>
+    <p class="sub">POSIX 소켓만으로 만든 서버에 <b>직접 요청을 보내고</b>, 요청이 서버 안을 지나가는 길을 확인합니다.</p>
+    <p id="js-check" class="js-check">JS가 안 불러와졌으면 이 문장이 그대로 보입니다.</p>
+  </header>
+
+  <!-- 요청 흐름도: 아래 버튼으로 보낸 모든 요청이 이 그림 위를 지나간다 -->
+  <section id="flow" class="flow sticky">
+    <div class="flow-head">
+      <span class="flow-title">요청 흐름</span>
+      <span id="flow-caption" class="flow-caption">버튼을 누르면 요청이 지나간 길이 표시됩니다</span>
+      <label class="pin"><input id="flow-pin" type="checkbox" checked> 화면 위에 고정</label>
+    </div>
+    <svg id="flow-svg" viewBox="0 0 960 192" role="img" aria-label="브라우저에서 accept, 작업 큐, 워커를 거쳐 정적 파일, 프록시, POST 에코로 갈라지는 요청 흐름도">
+      <path class="fedge" d="M120 97 H150 M270 97 H300 M410 97 H440 M590 97 H610 V32 H630 M610 97 H630 M610 97 V162 H630 M780 97 H797 V67 H815 M797 97 V127 H815"/>
+      <g class="fnode" id="n-browser"><rect x="10" y="75" width="110" height="44" rx="10"/><text x="65" y="92" class="t1">브라우저</text><text x="65" y="108" class="t2">fetch()</text></g>
+      <g class="fnode" id="n-accept"><rect x="150" y="75" width="120" height="44" rx="10"/><text x="210" y="92" class="t1">main 스레드</text><text x="210" y="108" class="t2">accept() → connfd</text></g>
+      <g class="fnode" id="n-queue"><rect x="300" y="75" width="110" height="44" rx="10"/><text x="355" y="92" class="t1">작업 큐</text><text x="355" y="108" class="t2">sbuf</text></g>
+      <g class="fnode" id="n-worker"><rect x="440" y="75" width="150" height="44" rx="10"/><text x="515" y="92" class="t1">워커 스레드</text><text x="515" y="108" class="t2">handle_one_request</text></g>
+      <g class="fnode" id="n-static"><rect x="630" y="10" width="150" height="44" rx="10"/><text x="705" y="27" class="t1">serve_static</text><text x="705" y="43" class="t2">./www 에서 파일</text></g>
+      <g class="fnode" id="n-proxy"><rect x="630" y="75" width="150" height="44" rx="10"/><text x="705" y="92" class="t1">proxy_forward</text><text x="705" y="108" class="t2">Round-Robin</text></g>
+      <g class="fnode" id="n-echo"><rect x="630" y="140" width="150" height="44" rx="10"/><text x="705" y="157" class="t1">POST 에코</text><text x="705" y="173" class="t2">본문 읽고 돌려주기</text></g>
+      <g class="fnode" id="n-a"><rect x="815" y="45" width="135" height="44" rx="10"/><text x="882" y="62" class="t1">백엔드 A</text><text x="882" y="78" class="t2">:8001</text></g>
+      <g class="fnode" id="n-b"><rect x="815" y="105" width="135" height="44" rx="10"/><text x="882" y="122" class="t1">백엔드 B</text><text x="882" y="138" class="t2">:8002</text></g>
+      <g id="dots"></g>
+    </svg>
+  </section>
+
+  <main>
+    <!-- 1. 정적 파일 + MIME -->
+    <section class="card">
+      <div class="card-head">
+        <span class="num">1</span>
+        <div>
+          <h2>정적 파일 서빙 + MIME 타입</h2>
+          <p class="desc">이 페이지는 아래 파일들로 이루어져 있습니다. 서버는 <code>./www</code>(루트 디렉토리)에서 파일을 찾고, 확장자로 <code>Content-Type</code>을 정합니다.</p>
+        </div>
+      </div>
+      <div class="row">
+        <button id="btn-static">파일별로 요청해 보기</button>
+        <img src="/images/dot.png" alt="PNG 이미지" class="dot" width="36" height="36">
+        <span class="hint">← 이 사각형도 서버가 보낸 PNG입니다</span>
+      </div>
+      <table class="result">
+        <thead><tr><th>요청</th><th>실제 파일</th><th>상태</th><th>Content-Type</th><th>바이트</th><th>시간</th></tr></thead>
+        <tbody id="static-body"><tr><td colspan="6" class="empty">버튼을 눌러 보세요</td></tr></tbody>
+      </table>
+    </section>
+
+    <!-- 2. serve_static 7단계 -->
+    <section class="card">
+      <div class="card-head">
+        <span class="num">2</span>
+        <div>
+          <h2>serve_static 안에서 일어나는 일</h2>
+          <p class="desc">URI 하나가 <b>파일 경로</b>로 바뀌고, 단계마다 검사를 거쳐 <b>상태 코드</b>가 정해집니다. 경로를 바꿔 가며 어느 단계에서 멈추는지 보세요.</p>
+        </div>
+      </div>
+      <div class="row">
+        <input id="steps-uri" class="uri-input" value="/style.css?v=2" spellcheck="false" aria-label="요청할 URI">
+        <button id="btn-steps">GET 보내기</button>
+      </div>
+      <div class="row presets">
+        <span class="hint">예시:</span>
+        <button class="preset" data-uri="/style.css?v=2">/style.css?v=2</button>
+        <button class="preset" data-uri="/">/</button>
+        <button class="preset" data-uri="/nope.html">/nope.html</button>
+        <button class="preset" data-uri="/images">/images</button>
+        <button class="preset" data-uri="/images/">/images/</button>
+        <button class="preset" data-uri="/../Makefile">/../Makefile</button>
+        <button class="preset" data-uri="/my file.txt">/my file.txt</button>
+      </div>
+      <div id="steps-sent" class="sent"></div>
+      <ol id="steps-list" class="steps"></ol>
+    </section>
+
+    <!-- 3. 오류 응답 -->
+    <section class="card">
+      <div class="card-head">
+        <span class="num">3</span>
+        <div>
+          <h2>오류 응답</h2>
+          <p class="desc">요청이 잘못되면 이유에 맞는 상태 코드를 돌려줍니다. 4xx는 손님 쪽 문제, 5xx는 서버 쪽 문제입니다.</p>
+        </div>
+      </div>
+      <div class="row">
+        <button class="btn-error" data-method="GET" data-path="/nope.html">GET /nope.html</button>
+        <button class="btn-error" data-method="GET" data-path="/images">GET /images (폴더)</button>
+        <button class="btn-error" data-method="PUT" data-path="/">PUT /</button>
+        <button class="btn-error" data-method="GET" data-path="/dead/">GET /dead/ (죽은 백엔드)</button>
+      </div>
+      <ul id="error-list" class="log"></ul>
+      <p class="note"><code>..</code>으로 루트 밖에 나가는 요청(403)은 브라우저가 보내기 전에 경로를 정리해 버려서, 터미널에서 확인합니다:
+        <code>curl -i --path-as-is localhost:8080/../Makefile</code></p>
+    </section>
+
+    <!-- 4. 리버스 프록시 -->
+    <section class="card">
+      <div class="card-head">
+        <span class="num">4</span>
+        <div>
+          <h2>리버스 프록시 + Round-Robin</h2>
+          <p class="desc"><code>/api/</code>로 시작하는 요청은 8080이 직접 답하지 않고 백엔드 A(8001)와 B(8002)에 <b>번갈아</b> 넘깁니다. 백엔드 하나를 꺼도 살아 있는 쪽으로 보냅니다.</p>
+        </div>
+      </div>
+      <div class="row">
+        <button id="btn-rr">GET /api/hello.txt × 6</button>
+        <button id="btn-bonly" class="secondary">GET /b/only.txt (B 전용)</button>
+        <button id="btn-rr-clear" class="ghost">지우기</button>
+      </div>
+      <div id="rr-track" class="track"><span class="empty">버튼을 눌러 보세요</span></div>
+      <p class="note">실험: 터미널에서 백엔드 A를 끄고(<code>kill</code>) 다시 눌러 보세요. B만 응답합니다. 둘 다 끄면 <b>502</b>입니다.</p>
+    </section>
+
+    <!-- 5. POST 본문 -->
+    <section class="card">
+      <div class="card-head">
+        <span class="num">5</span>
+        <div>
+          <h2>POST 본문 받기</h2>
+          <p class="desc">서버는 헤더의 <code>Content-Length</code>만큼 본문을 끝까지 읽고, 받은 내용을 그대로 돌려줍니다(에코).</p>
+        </div>
+      </div>
+      <div class="post">
+        <textarea id="post-text" rows="3">안녕하세요, 정글!</textarea>
+        <div class="row">
+          <button id="btn-post">POST /echo 보내기</button>
+          <span id="post-bytes" class="hint"></span>
+        </div>
+      </div>
+      <div id="post-result" class="echo"><span class="empty">보낸 내용이 여기에 돌아옵니다</span></div>
+    </section>
+
+    <!-- 6. 동시 요청 + TCP 연결 타임라인 -->
+    <section class="card">
+      <div class="card-head">
+        <span class="num">6</span>
+        <div>
+          <h2>동시 요청과 TCP 연결 재사용</h2>
+          <p class="desc">요청을 한꺼번에 보내고, 요청마다 <b>새 TCP 연결을 맺었는지</b>, <b>기존 연결을 재사용했는지</b>를 시간 순서로 그립니다.</p>
+        </div>
+      </div>
+      <div class="row">
+        <label class="hint">요청 수 <input id="burst-n" type="number" min="1" max="200" value="30"></label>
+        <button id="btn-burst">동시에 보내기</button>
+      </div>
+      <div id="burst-summary" class="summary"><span class="empty">버튼을 눌러 보세요</span></div>
+      <div class="legend">
+        <span><i class="seg-stall"></i>브라우저에서 빈 연결 기다림</span>
+        <span><i class="seg-connect"></i>새 TCP 연결 (3-way handshake)</span>
+        <span><i class="seg-wait"></i>서버 처리 기다림</span>
+        <span><i class="seg-recv"></i>응답 받기</span>
+      </div>
+      <div id="timeline" class="timeline"></div>
+      <div id="timeline-axis" class="axis"></div>
+      <p class="note">브라우저는 서버 하나에 연결을 6개 정도만 엽니다. 새 연결(주황)은 처음 몇 개뿐이고, 나머지 요청은 빈 연결이 생길 때까지 기다렸다가(회색) <b>keep-alive로 같은 연결을 재사용</b>합니다.</p>
+    </section>
+  </main>
+
+  <footer>
+    서버 로그를 옆 터미널에 띄워 두면, 버튼을 누를 때마다 요청이 찍히는 것을 같이 볼 수 있습니다.
+  </footer>
+
+  <script src="/script.js"></script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+server
+server_*
+*.o
+tests/run_tests
